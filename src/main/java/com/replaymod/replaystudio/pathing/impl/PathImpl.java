@@ -33,6 +33,7 @@ public class PathImpl implements Path {
     private final Timeline timeline;
     private Map<Long, Keyframe> keyframes = new TreeMap<>();
     private List<PathSegment> segments = new LinkedList<>();
+    private NavigableMap<Long, PathSegment> segmentsByStart = new TreeMap<>();
     private boolean active = true;
 
     public PathImpl(Timeline timeline) {
@@ -113,7 +114,7 @@ public class PathImpl implements Path {
         if (segments.isEmpty()) {
             if (keyframes.size() >= 2) {
                 Iterator<Keyframe> iter = keyframes.values().iterator();
-                segments.add(new PathSegmentImpl(this, iter.next(), iter.next()));
+                addSegment(new PathSegmentImpl(this, iter.next(), iter.next()));
             }
             return;
         }
@@ -122,23 +123,23 @@ public class PathImpl implements Path {
         PathSegment next = iter.next();
         if (keyframe.getTime() < next.getStartKeyframe().getTime()) {
             iter.previous();
-            iter.add(new PathSegmentImpl(this, keyframe, next.getStartKeyframe(), next.getInterpolator()));
+            addSegment(iter, new PathSegmentImpl(this, keyframe, next.getStartKeyframe(), next.getInterpolator()));
             return;
         }
 
         while (true) {
             if (next.getStartKeyframe().getTime() <= keyframe.getTime()
                     && next.getEndKeyframe().getTime() >= keyframe.getTime()) {
-                iter.remove();
-                iter.add(new PathSegmentImpl(this, next.getStartKeyframe(), keyframe, next.getInterpolator()));
-                iter.add(new PathSegmentImpl(this, keyframe, next.getEndKeyframe(), next.getInterpolator()));
+                removeSegment(iter, next);
+                addSegment(iter, new PathSegmentImpl(this, next.getStartKeyframe(), keyframe, next.getInterpolator()));
+                addSegment(iter, new PathSegmentImpl(this, keyframe, next.getEndKeyframe(), next.getInterpolator()));
                 next.setInterpolator(null);
                 return;
             }
             if (iter.hasNext()) {
                 next = iter.next();
             } else {
-                iter.add(new PathSegmentImpl(this, next.getEndKeyframe(), keyframe, next.getInterpolator()));
+                addSegment(iter, new PathSegmentImpl(this, next.getEndKeyframe(), keyframe, next.getInterpolator()));
                 return;
             }
         }
@@ -156,6 +157,7 @@ public class PathImpl implements Path {
                 segment.setInterpolator(null);
             }
             segments.clear();
+            segmentsByStart.clear();
             return;
         }
 
@@ -163,11 +165,11 @@ public class PathImpl implements Path {
         while (iter.hasNext()) {
             PathSegment next = iter.next();
             if (next.getEndKeyframe() == keyframe) {
-                iter.remove();
+                removeSegment(iter, next);
                 if (iter.hasNext()) {
                     PathSegment next2 = iter.next();
-                    iter.remove();
-                    iter.add(new PathSegmentImpl(this, next.getStartKeyframe(), next2.getEndKeyframe(),
+                    removeSegment(iter, next2);
+                    addSegment(iter, new PathSegmentImpl(this, next.getStartKeyframe(), next2.getEndKeyframe(),
                             (useFirstInterpolator ? next : next2).getInterpolator()));
                     next2.setInterpolator(null);
                 }
@@ -176,7 +178,7 @@ public class PathImpl implements Path {
             }
             if (next.getStartKeyframe() == keyframe) {
                 next.setInterpolator(null);
-                iter.remove();
+                removeSegment(iter, next);
                 return;
             }
         }
@@ -194,11 +196,29 @@ public class PathImpl implements Path {
     }
 
     private PathSegment getSegment(long time) {
-        for (PathSegment segment : segments) {
-            if (segment.getStartKeyframe().getTime() <= time && segment.getEndKeyframe().getTime() >= time) {
-                return segment;
-            }
+        Map.Entry<Long, PathSegment> entry = segmentsByStart.floorEntry(time);
+        if (entry == null) {
+            return null;
+        }
+        PathSegment segment = entry.getValue();
+        if (segment.getEndKeyframe().getTime() >= time) {
+            return segment;
         }
         return null;
+    }
+
+    private void addSegment(PathSegment segment) {
+        segments.add(segment);
+        segmentsByStart.put(segment.getStartKeyframe().getTime(), segment);
+    }
+
+    private void addSegment(ListIterator<PathSegment> iter, PathSegment segment) {
+        iter.add(segment);
+        segmentsByStart.put(segment.getStartKeyframe().getTime(), segment);
+    }
+
+    private void removeSegment(ListIterator<PathSegment> iter, PathSegment segment) {
+        iter.remove();
+        segmentsByStart.remove(segment.getStartKeyframe().getTime());
     }
 }
