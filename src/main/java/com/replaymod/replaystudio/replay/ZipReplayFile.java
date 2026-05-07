@@ -317,7 +317,10 @@ public class ZipReplayFile extends AbstractReplayFile {
 
     @Override
     public void save() throws IOException {
+        closeOpenOutputStreams();
+        discardUnchangedEntries();
         if (zipFile != null && changedEntries.isEmpty() && removedEntries.isEmpty()) {
+            delete(tmpFiles);
             return; // No changes, no need to save
         }
         File outputFile = createTempFile("replaystudio", "replayfile").toFile();
@@ -332,10 +335,7 @@ public class ZipReplayFile extends AbstractReplayFile {
 
     @Override
     public void saveTo(File target) throws IOException {
-        for (OutputStream out : outputStreams.values()) {
-            Closeables.close(out, false);
-        }
-        outputStreams.clear();
+        closeOpenOutputStreams();
 
         try (ZipOutputStream out = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(target)))) {
             if (zipFile != null) {
@@ -351,6 +351,54 @@ public class ZipReplayFile extends AbstractReplayFile {
             for (Map.Entry<String, File> e : changedEntries.entrySet()) {
                 out.putNextEntry(new ZipEntry(e.getKey()));
                 Utils.copy(new BufferedInputStream(new FileInputStream(e.getValue())), out);
+            }
+        }
+    }
+
+    private void closeOpenOutputStreams() throws IOException {
+        for (OutputStream out : outputStreams.values()) {
+            Closeables.close(out, false);
+        }
+        outputStreams.clear();
+    }
+
+    private void discardUnchangedEntries() throws IOException {
+        if (zipFile == null || changedEntries.isEmpty()) {
+            return;
+        }
+        Iterator<Map.Entry<String, File>> iterator = changedEntries.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<String, File> entry = iterator.next();
+            ZipEntry zipEntry = zipFile.getEntry(entry.getKey());
+            if (zipEntry != null && hasSameBytes(entry.getValue(), zipEntry)) {
+                delete(entry.getValue());
+                iterator.remove();
+            }
+        }
+    }
+
+    private boolean hasSameBytes(File changedFile, ZipEntry originalEntry) throws IOException {
+        if (changedFile.length() != originalEntry.getSize()) {
+            return false;
+        }
+        try (InputStream changed = new BufferedInputStream(new FileInputStream(changedFile));
+             InputStream original = new BufferedInputStream(zipFile.getInputStream(originalEntry))) {
+            byte[] changedBuffer = new byte[8192];
+            byte[] originalBuffer = new byte[8192];
+            while (true) {
+                int changedRead = changed.read(changedBuffer);
+                int originalRead = original.read(originalBuffer);
+                if (changedRead != originalRead) {
+                    return false;
+                }
+                if (changedRead == -1) {
+                    return true;
+                }
+                for (int i = 0; i < changedRead; i++) {
+                    if (changedBuffer[i] != originalBuffer[i]) {
+                        return false;
+                    }
+                }
             }
         }
     }
