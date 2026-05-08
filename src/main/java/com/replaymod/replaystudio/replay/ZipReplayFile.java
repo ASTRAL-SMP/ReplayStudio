@@ -296,6 +296,37 @@ public class ZipReplayFile extends AbstractReplayFile {
     }
 
     @Override
+    public OutputStream writeCacheRaw(String entry) throws IOException {
+        Path path = cache.toPath().resolve(entry);
+        Files.createDirectories(path.getParent());
+        return new BufferedOutputStream(Files.newOutputStream(path));
+    }
+
+    @Override
+    public java.nio.MappedByteBuffer getCacheMmap(String entry) throws IOException {
+        Path path = cache.toPath().resolve(entry);
+        if (!Files.exists(path)) return null;
+        try (java.nio.channels.FileChannel fc = java.nio.channels.FileChannel.open(path, java.nio.file.StandardOpenOption.READ)) {
+            long size = fc.size();
+            if (size <= 0 || size > Integer.MAX_VALUE) {
+                // Single MappedByteBuffer is capped at Integer.MAX_VALUE bytes (~2 GiB).
+                // For caches bigger than that the caller should fall back to streaming reads.
+                return null;
+            }
+            return fc.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, size);
+        }
+    }
+
+    @Override
+    public Optional<InputStream> getCacheRaw(String entry) throws IOException {
+        Path path = cache.toPath().resolve(entry);
+        if (!Files.exists(path)) {
+            return Optional.absent();
+        }
+        return Optional.of(new BufferedInputStream(Files.newInputStream(path)));
+    }
+
+    @Override
     public void remove(String entry) throws IOException {
         saveInputFile();
         Closeables.close(outputStreams.remove(entry), true);

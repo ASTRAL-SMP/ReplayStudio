@@ -62,7 +62,10 @@ import java.util.logging.Logger;
 public abstract class RandomAccessReplay {
     private static final String CACHE_ENTRY = "quickModeCache.bin";
     private static final String CACHE_INDEX_ENTRY = "quickModeCacheIndex.bin";
-    private static final int CACHE_VERSION = 10;
+    // Bumped 10 -> 11: the .bin entry is now written uncompressed so it can be mmap'd on
+    // read, dropping the multi-hundred-MB heap allocation that previously caused OOMs on
+    // long replays. Old caches fail this check and get re-analysed on next open.
+    private static final int CACHE_VERSION = 11;
     private static final Logger LOGGER = Logger.getLogger(RandomAccessReplay.class.getName());
 
     private final ReplayFile replayFile;
@@ -94,7 +97,23 @@ public abstract class RandomAccessReplay {
         Optional<InputStream> cacheIndexOpt = replayFile.getCache(CACHE_INDEX_ENTRY);
         if (!cacheIndexOpt.isPresent()) return false;
         try (InputStream indexIn = cacheIndexOpt.get()) {
-            Optional<InputStream> cacheOpt = replayFile.getCache(CACHE_ENTRY);
+            // Prefer the mmap path: the OS page cache becomes our working-set "ring buffer",
+            // and the JVM heap stays small even for multi-hundred-MB caches.
+            java.nio.MappedByteBuffer mmap = replayFile.getCacheMmap(CACHE_ENTRY);
+            if (mmap != null) {
+                Pair<Replay, ReadableCache> result = loadFromCacheMmap(mmap, indexIn, progress);
+                if (result == null) return false;
+                Replay replay = result.getLeft();
+                ReadableCache cache = result.getRight();
+                replay.load(Packet::release, cache);
+                this.state = replay;
+                this.cache = cache;
+                return true;
+            }
+            // Fall back to the legacy stream path. Try the raw (uncompressed) form first
+            // since that's what we now write; getCacheRaw default falls back to the GZIP'd
+            // legacy form for non-Zip ReplayFile implementations.
+            Optional<InputStream> cacheOpt = replayFile.getCacheRaw(CACHE_ENTRY);
             if (!cacheOpt.isPresent()) return false;
             try (InputStream cacheIn = cacheOpt.get()) {
                 Pair<Replay, ReadableCache> result = loadFromCache(cacheIn, indexIn, progress);
@@ -110,6 +129,34 @@ public abstract class RandomAccessReplay {
             LOGGER.log(Level.WARNING, "Re-analysing replay due to premature EOF while loading the cache:", e);
             return false;
         }
+    }
+
+    private Pair<Replay, ReadableCache> loadFromCacheMmap(java.nio.MappedByteBuffer mmap, InputStream rawIndexIn, Consumer<Double> progress) throws IOException {
+        long sysTimeStart = System.currentTimeMillis();
+
+        ByteBuf cacheBuf = Unpooled.wrappedBuffer(mmap);
+        cacheBuf.readerIndex(0);
+        NetInput cacheIn = new com.replaymod.replaystudio.util.ByteBufExtNetInput(cacheBuf);
+        NetInput in = new StreamNetInput(rawIndexIn);
+        if (in.readVarInt() != CACHE_VERSION) return null;
+        if (cacheIn.readVarInt() != CACHE_VERSION) return null;
+        if (in.readVarInt() != registry.getVersion().getOriginalVersion()) return null;
+        if (cacheIn.readVarInt() != registry.getVersion().getOriginalVersion()) return null;
+
+        Replay replay = new Replay(registry, in);
+
+        int size = in.readVarInt();
+        LOGGER.info("Mapped quick mode buffer of size: " + size / 1024 + "KB (mmap)");
+        progress.accept(1.0);
+
+        // Slice from current reader index so ReadableCache's seek(index) lines up with the
+        // offsets the analyser wrote at ANALYSE time (it counted from the start of the data
+        // *after* the version/protocol header).
+        ByteBuf slice = cacheBuf.slice(cacheBuf.readerIndex(), size);
+        ReadableCache cache = new ReadableCache(slice);
+
+        LOGGER.info("Loaded quick replay from cache (mmap) in " + (System.currentTimeMillis() - sysTimeStart) + "ms");
+        return Pair.of(replay, cache);
     }
 
     private Pair<Replay, ReadableCache> loadFromCache(InputStream rawCacheIn, InputStream rawIndexIn, Consumer<Double> progress) throws IOException {
@@ -142,8 +189,11 @@ public abstract class RandomAccessReplay {
 
     private void analyseReplay(Consumer<Double> progress) throws IOException {
         double sysTimeStart = System.currentTimeMillis();
+        // CACHE_ENTRY (the big binary cache) is written *uncompressed* via writeCacheRaw so
+        // the next open can mmap it. CACHE_INDEX_ENTRY stays GZIP'd via writeCache: it's
+        // small, never mmap'd, and keeping compression saves a few KB on disk.
         try (ReplayInputStream in = replayFile.getPacketData(registry.withLoginSuccess());
-             OutputStream cacheOut = replayFile.writeCache(CACHE_ENTRY);
+             OutputStream cacheOut = replayFile.writeCacheRaw(CACHE_ENTRY);
              OutputStream cacheIndexOut = replayFile.writeCache(CACHE_INDEX_ENTRY)) {
             NetOutput out = new StreamNetOutput(cacheOut);
             out.writeVarInt(CACHE_VERSION);

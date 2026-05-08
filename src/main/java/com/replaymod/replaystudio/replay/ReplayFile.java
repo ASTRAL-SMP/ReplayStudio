@@ -92,6 +92,38 @@ public interface ReplayFile extends Closeable {
     OutputStream writeCache(String entry) throws IOException;
 
     /**
+     * Like {@link #writeCache(String)} but writes the bytes uncompressed so the resulting
+     * file can be {@link #getCacheMmap memory-mapped} on read instead of fully loaded into
+     * the JVM heap. Defaults to {@link #writeCache(String)}; implementations that store the
+     * cache as on-disk files should override.
+     */
+    default OutputStream writeCacheRaw(String entry) throws IOException {
+        return writeCache(entry);
+    }
+
+    /**
+     * Returns a read-only memory mapping of a previously written {@link #writeCacheRaw raw}
+     * cache entry, or {@code null} if mmap isn't supported / the entry is missing / the entry
+     * is too big for a single mapping (>2 GiB).
+     *
+     * Loading the QuickMode cache via mmap lets the OS page cache handle the working set
+     * instead of the JVM keeping the whole binary on the heap, which is the main RAM win
+     * for very long replays.
+     */
+    default java.nio.MappedByteBuffer getCacheMmap(String entry) throws IOException {
+        return null;
+    }
+
+    /**
+     * Stream-reads a {@link #writeCacheRaw raw} (uncompressed) cache entry. Used as a
+     * fallback when {@link #getCacheMmap} returns null (e.g. file >2GiB) but the entry is
+     * still present in raw form. Default falls back to the GZIP'd {@link #getCache}.
+     */
+    default Optional<InputStream> getCacheRaw(String entry) throws IOException {
+        return getCache(entry);
+    }
+
+    /**
      * Removes the entry from this replay file.
      * Changes will not be written unless {@link #save()} is called.
      * @param entry The entry
