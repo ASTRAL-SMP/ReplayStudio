@@ -337,22 +337,51 @@ public class ZipReplayFile extends AbstractReplayFile {
     public void saveTo(File target) throws IOException {
         closeOpenOutputStreams();
 
+        // Diagnostic: time the unchanged-entry re-deflate vs changed-entry writes so we can
+        // pin down whether MarkerProcessor.split is bottlenecked here. Remove with the rest
+        // of the 3.2.6 timing once root cause is decided.
+        java.util.logging.Logger DIAG = java.util.logging.Logger.getLogger("ZipReplayFileTiming");
+        long t0 = System.nanoTime();
+        long unchangedNs = 0;
+        long unchangedBytes = 0;
+        int unchangedCount = 0;
+        long changedNs = 0;
+        long changedBytes = 0;
+        int changedCount = 0;
+
         try (ZipOutputStream out = new ZipOutputStream(new BufferedOutputStream(new FileOutputStream(target)))) {
             if (zipFile != null) {
                 for (ZipEntry entry : Collections.list(zipFile.entries())) {
                     if (!changedEntries.containsKey(entry.getName()) && !removedEntries.contains(entry.getName())) {
+                        long entryStart = System.nanoTime();
                         entry = new ZipEntry(entry);
+                        long entrySize = entry.getSize();
                         entry.setCompressedSize(-1);
                         out.putNextEntry(entry);
                         Utils.copy(zipFile.getInputStream(entry), out);
+                        unchangedNs += System.nanoTime() - entryStart;
+                        if (entrySize > 0) unchangedBytes += entrySize;
+                        unchangedCount++;
                     }
                 }
             }
             for (Map.Entry<String, File> e : changedEntries.entrySet()) {
+                long entryStart = System.nanoTime();
                 out.putNextEntry(new ZipEntry(e.getKey()));
                 Utils.copy(new BufferedInputStream(new FileInputStream(e.getValue())), out);
+                changedNs += System.nanoTime() - entryStart;
+                changedBytes += e.getValue().length();
+                changedCount++;
             }
         }
+
+        long totalNs = System.nanoTime() - t0;
+        DIAG.info(String.format(
+                "ZipReplayFile.saveTo %s: total=%.2fs unchanged=%.2fs(%dMB,%d entries) changed=%.2fs(%dMB,%d entries)",
+                target.getName(),
+                totalNs / 1e9,
+                unchangedNs / 1e9, unchangedBytes / (1024 * 1024), unchangedCount,
+                changedNs / 1e9, changedBytes / (1024 * 1024), changedCount));
     }
 
     private void closeOpenOutputStreams() throws IOException {
