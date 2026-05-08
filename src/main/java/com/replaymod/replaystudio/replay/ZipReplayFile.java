@@ -405,6 +405,15 @@ public class ZipReplayFile extends AbstractReplayFile {
 
     @Override
     public void close() throws IOException {
+        // Diagnostic: log who closes the file so we can identify spurious closes that race
+        // with QuickMode init / FullReplaySender prefetch (see log21 / log22 investigation).
+        // Tagged WARN so it shows up in user logs without enabling debug — remove once the
+        // root cause is identified and fixed for good.
+        java.util.logging.Logger.getLogger(ZipReplayFile.class.getName())
+                .log(java.util.logging.Level.WARNING,
+                     "ZipReplayFile.close called for " + (input != null ? input.getName() : "<null>"),
+                     new Throwable("ZipReplayFile.close stacktrace"));
+
         if (zipFile != null) {
             zipFile.close();
         }
